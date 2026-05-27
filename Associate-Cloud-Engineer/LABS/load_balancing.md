@@ -41,7 +41,7 @@ Your active configuration is: [cloudshell-18417]
 [environment: untagged] Read more to tag: g.co/cloud/project-env-tag.
 ```
 
-## Task 1: Default Region and zone
+### Task 1: Default Region and zone
 let's set the default region.\
 We want use-east1:
 ```Bash
@@ -52,7 +52,7 @@ the set default zone to us-east1-b:
 gcloud config set compute/zone us-east1-b
 ```
 
-## Task 2: Create multiple web server instances
+### Task 2: Create multiple web server instances
 We want to load balance 3 compute engine VM instances running Apache.\
 We also want a firewall rule allowing HTTP traffic to reach the instances.
 
@@ -161,7 +161,7 @@ RawContentLength  : 27
 ```
 huzzah!
 
-## Task 3: Configure the load balancing service
+### Task 3: Configure the load balancing service
 When configuring the load balancing service, we want to ensure our VM instances recieved packets destined for the static external IP address that I configure.
 > instances made with compute enginge are automatically configured to handle this IP
 
@@ -185,7 +185,7 @@ PORT: 80
 REQUEST_PATH: /
 ```
 
-## Task 4: Create the target pool and forwarding rule
+### Task 4: Create the target pool and forwarding rule
 A target pool is a group of backend instances receiving incoming traffic from external passtrhough NLBs.\
 All backend instances of a target pool must reside in the same Google Cloud region.
 
@@ -225,7 +225,7 @@ gcloud compute forwarding-rules create www-rule \
 Created [https://www.googleapis.com/compute/v1/projects/qwiklabs-gcp-04-cbeaaaa13542/regions/us-east1/forwardingRules/www-rule].
 ```
 
-## Task 5: Send traffic to our instances
+### Task 5: Send traffic to our instances
 Now that load balancing is configured, we can start sending traffic to the forwarding rule.\
 Let's grab the external IP address of the www-rule forwarding rule we want our load balancer to use:
 ```Bash
@@ -289,9 +289,247 @@ gwyn@firelink:~ $ while true; do curl -m1 34.139.179.216; done
 ```
 It worked!
 
-## Next Steps
+### Next Steps
 The lab is complete.\
 Optionally, we can read the following [guide](https://docs.cloud.google.com/load-balancing/docs/network/setting-up-network-backend-service) if we want to learn more.
+
+---
+
+## Application Load Balancing
+
+### Task 1: Set default region and zone
+
+```Bash
+gcloud config set compute/region us-central1
+```
+```Bash
+gcloud config set compute/zone us-central1-b
+```
+
+### Task 2: Create VMs
+
+```Bash
+  gcloud compute instances create www1 \
+    --zone=us-central1-b \
+    --tags=network-lb-tag \
+    --machine-type=e2-small \
+    --image-family=debian-11 \
+    --image-project=debian-cloud \
+    --metadata=startup-script='#!/bin/bash
+      apt-get update
+      apt-get install apache2 -y
+      service apache2 restart
+      echo "
+<h3>Web Server: www1</h3>" | tee /var/www/html/index.html'
+```
+copy to do www2 and www3.
+
+add firewall rule:
+```Bash
+gcloud compute firewall-rules create www-firewall-network-lb \
+    --target-tags network-lb-tag --allow tcp:80
+```
+
+### Task 3: Create Application Load Balancer
+Application Load Balancing is implemented on GFE (Google Front End).\
+They are distributed globally and operate together using Google global network and control plane.\
+We can configure URL rules to route some URLs to one set of instances and others to others.
+
+Requested are alwats routed to instance group closest to user if it has enough capacity and is appropriate for rewquest.\
+If closest group too full, then goes on to next closest.
+
+To set upnthe load balancer with compute engine backend, we need to move our VMs to an instance group then manage the instance group for external application load balancing.\
+We want to give the backends their own hostnames as well.
+
+Let's create the load balancer template:
+```Bash
+gcloud compute instance-templates create lb-backend-template \
+   --region=us-central1 \
+   --network=default \
+   --subnet=default \
+   --tags=allow-health-check \
+   --machine-type=e2-medium \
+   --image-family=debian-11 \
+   --image-project=debian-cloud \
+   --metadata=startup-script='#!/bin/bash
+     apt-get update
+     apt-get install apache2 -y
+     a2ensite default-ssl
+     a2enmod ssl
+     vm_hostname="$(curl -H "Metadata-Flavor:Google" \
+     http://169.254.169.254/computeMetadata/v1/instance/name)"
+     echo "Page served from: $vm_hostname" | \
+     tee /var/www/html/index.html
+     systemctl restart apache2'
+```
+now the managed group via the template:
+```Bash
+gcloud compute instance-groups managed create lb-backend-group \
+   --template=lb-backend-template --size=2 --zone=us-central1-b
+```
+and finally the firewall health check rule:
+```Bash
+gcloud compute firewall-rules create fw-allow-health-check \
+  --network=default \
+  --action=allow \
+  --direction=ingress \
+  --source-ranges=130.211.0.0/22,35.191.0.0/16 \
+  --target-tags=allow-health-check \
+  --rules=tcp:80
+```
+This is an ingress rule that allows traffic from Google Cloud health checking systems (130.211.0.0/22 and 35.191.0.0/16).
+
+Now, let's set up our global static external IP:
+```Bash
+gcloud compute addresses create lb-ipv4-1 \
+  --ip-version=IPV4 \
+  --global
+```
+we can view it using:
+```Bash
+gcloud compute addresses describe lb-ipv4-1 \
+  --format="get(address)" \
+  --global
+```
+```Bash
+34.117.178.56
+```
+
+Time for health check creation:
+```Bash
+gcloud compute health-checks create http http-basic-check \
+  --port 80
+```
+followed by creation of the backend service:
+```Bash
+gcloud compute backend-services create web-backend-service \
+  --protocol=HTTP \
+  --port-name=http \
+  --health-checks=http-basic-check \
+  --global
+```
+to which we then add our instance group as the backend for:
+```Bash
+gcloud compute backend-services add-backend web-backend-service \
+  --instance-group=lb-backend-group \
+  --instance-group-zone=us-central1-b \
+  --global
+```
+
+Now we have our backend set up, let's make a URL mapto route incoming requests to the backend service:
+```Bash
+gcloud compute url-maps create web-map-http \
+    --default-service web-backend-service
+```
+We can read more about URL maps [here](https://cloud.google.com/load-balancing/docs/url-map-concepts).\
+In general, it is a Google Cloud config resource used to route requests to backend services/buckets.\
+For example, we can use a single URL map to route requests to different destinations based on rules configured as seen below:
+- Requests for https://example.com/video go to one backend service
+- Requests for https://example.com/audio go to a different backend service.
+- Requests for https://example.com/images go to a Cloud Storage backend bucket.
+- Requests for any other host and path combination go to a default backend service.
+
+Let's also make a [target HTTP Proxy](https://cloud.google.com/load-balancing/docs/target-proxies) so we can route requests to the URL map:
+```Bash
+gcloud compute target-http-proxies create http-lb-proxy \
+    --url-map web-map-http
+```
+Then, we want to make a [global forwarding rule](https://cloud.google.com/load-balancing/docs/forwarding-rule-concepts) to route incoming requests to the proxy:
+```Bash
+gcloud compute forwarding-rules create http-content-rule \
+   --address=lb-ipv4-1\
+   --global \
+   --target-http-proxy=http-lb-proxy \
+   --ports=80
+```
+Note: A forwarding rule and its correspnding IP address represent the frontend config of a Google Cloud load balancer.\
+We can learn more at the [forwarding rules overview page](https://cloud.google.com/load-balancing/docs/forwarding-rule-concepts).
+
+### Task 4: Test traffic to instances
+Let us leave the CLI for now and go back to the main console.\
+We want to search for *load balancing* and click into the first result.\
+The puts us in the **Network Services** parent.
+
+Doing so, we will see our *web-map-http* load balancer up and running!
+
+We can look into the load balancer and see it's IP.\
+Going to that IP at HTTP will show "Page served from:..... like so:
+```Bash
+gwyn@firelink:~ $ curl 34.117.178.56
+Page served from: lb-backend-group-4fws
+```
+
+> LAB DONE
+
+## Use an Internal Application Load Balancer
+
+### Task 1: Create a virtual environment
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

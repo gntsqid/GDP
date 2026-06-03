@@ -461,38 +461,306 @@ or in the menu, enable ACK messages adnd check the *messages* tab in our *MySub*
 ---
 ## Pub/Sub (CLI vers.)
 
-### 
+### Task 1: Pub/Sub Topics
+Create the topic:
+```Bash
+gcloud pubsub topics create myTopic
+```
+> this failed due to some error
+>> apparently I need the project....let's do this
+```Bash
+# get project
+gcloud config list project
+```
+```Bash
+# add --project flag (qwiklabs-gcp-02-ec616a297f82)
+gcloud pubsub topics create myTopic --project qwiklabs-gcp-02-ec616a297f82
+```
+
+list all topics:
+```Bash
+gcloud pubsub topics list
+```
+
+we can cleanup and delete (**but dont actually**):
+```Bash
+gcloud pubsub topics delete myTopic
+```
+
+### Task 2: Pub/Sub Subscriptions
+Make a subscription tied to our topic:
+```Bash
+gcloud  pubsub subscriptions create --topic myTopic mySubscription
+```
+
+list all subscriptions tied to our topic:
+```Bash
+gcloud pubsub topics list-subscriptions myTopic
+```
+
+### Task 3: Pub/Sub
+Let's publish a message:
+```Bash
+gcloud pubsub topics publish myTopic --message "Hello"
+```
+
+now we want to pull a message:
+```Bash
+gcloud pubsub subscriptions pull mySubscription --auto-ack
+```
+
+### Task 4: Pub/Sub pull all measages from all subscriptions
+Let's note that we pulled only one messages at the end of task 3.\
+We can do it with multiple messages:
+```Bash
+gcloud pubsub subscriptions pull mySubscription --limit=3
+```
+
+> Note: once a message is pulled, you can't pull it again
+>> they will loop though?
+
+---
+## Pub/Sub (Python vers.)
+We can use Python right in the CLI.
+
+### Task 1: Create a virtual env
+Install the venv:
+```Bash
+sudo apt-get install -y virtualenv
+```
+build it:
+```Bash
+python3 -m venv venv
+```
+then activate so we can use:
+```Bash
+source venv/bin/activate
+```
+this will put us into it like so:
+```Bash
+(venv) student_02_a6089fafab15@cloudshell:~ (qwiklabs-gcp-03-d19a1e7184fb)$
+```
+
+### Task2: Install the client library
+Install it with pip:
+```Bash
+pip install --upgrade google-cloud-pubsub
+```
+we are going to grab some specific sample code to run with git:
+```Bash
+git clone https://github.com/googleapis/python-pubsub.git
+```
+then we move to that dir:
+```Bash
+cd python-pubsub/samples/snippets
+```
+
+### Task 3: Pub/Sub basics
+> skipping
+
+### Task 4: Create a topic
+We want to be able to do the same setup we've been doing but with Python.\
+Let's first verify what our Project ID is.\
+It is stored in a variable:
+```Bash
+echo $GOOGLE_CLOUD_PROJECT
+```
+for this specific sample code, let's read the main publisher file:
+```Bash
+cat publisher.py
+python publisher.py -h # see usage and commands
+```
+> publisher.py is a script that demonstrates how to perform basic operations on topics with the Cloud Pub/Sub API
+
+
+Looking at the comands we now know how to create a topic:
+```Bash
+python publisher.py $GOOGLE_CLOUD_PROJECT create MyTopic
+```
+and list them:
+```Bash
+python publisher.py $GOOGLE_CLOUD_PROJECT list
+```
+
+### Task 5: Create a subscription
+```Bash
+python subscriber.py $GOOGLE_CLOUD_PROJECT create MyTopic MySub
+```
+list them:
+```Bash
+python subscriber.py $GOOGLE_CLOUD_PROJECT list-in-project
+```
+
+### Task 6: Publish messages
+```Bash
+gcloud pubsub topics publish MyTopic --message "Hello"
+```
+
+### Task 7: View messages
+```Bash
+python subscriber.py $GOOGLE_CLOUD_PROJECT receive MySub
+```
+
+---
+---
+## Challenge Lab
+### Task 1: Create a bucket
+```Bash
+gcloud storage buckets create gs://qwiklabs-gcp-03-7f2c57bab1f2-bucket --location=asia-southeast1
+```
+
+### Task 2: Create a Pub/Sub topic
+```Bash
+gcloud pubsub topics create  topic-memories-916
+```
+
+### Task 3: Create the thumbnail CLoud Run Function
+This one will need the **BUCKET-NAME** used in task 1.
+
+```Bash
+# region
+gcloud config set run/region asia-southeast1
+
+# directory to host function
+mkdir gcf_challenge && cd $_
+
+# create index.js and package.json
+touch index.js
+touch package.json
+```
+
+use this code for index.js:
+```javascript
+const functions = require('@google-cloud/functions-framework');
+const { Storage } = require('@google-cloud/storage');
+const { PubSub } = require('@google-cloud/pubsub');
+const sharp = require('sharp');
+
+functions.cloudEvent('memories-thumbnail-creator', async cloudEvent => {
+  const event = cloudEvent.data;
+
+  console.log(`Event: ${JSON.stringify(event)}`);
+  console.log(`Hello ${event.bucket}`);
+
+  const fileName = event.name;
+  const bucketName = event.bucket;
+  const size = "64x64";
+  const bucket = new Storage().bucket(bucketName);
+  const topicName = "topic-memories-532";
+  const pubsub = new PubSub();
+
+  if (fileName.search("64x64_thumbnail") === -1) {
+    // doesn't have a thumbnail, get the filename extension
+    const filename_split = fileName.split('.');
+    const filename_ext = filename_split[filename_split.length - 1].toLowerCase();
+    const filename_without_ext = fileName.substring(0, fileName.length - filename_ext.length - 1); // fix sub string to remove the dot
+
+    if (filename_ext === 'png' || filename_ext === 'jpg' || filename_ext === 'jpeg') {
+      // only support png and jpg at this point
+      console.log(`Processing Original: gs://${bucketName}/${fileName}`);
+      const gcsObject = bucket.file(fileName);
+      const newFilename = `${filename_without_ext}_64x64_thumbnail.${filename_ext}`;
+      const gcsNewObject = bucket.file(newFilename);
+
+      try {
+        const [buffer] = await gcsObject.download();
+        const resizedBuffer = await sharp(buffer)
+          .resize(64, 64, {
+            fit: 'inside',
+            withoutEnlargement: true,
+          })
+          .toFormat(filename_ext)
+          .toBuffer();
+
+        await gcsNewObject.save(resizedBuffer, {
+          metadata: {
+            contentType: `image/${filename_ext}`,
+          },
+        });
+
+        console.log(`Success: ${fileName} → ${newFilename}`);
+
+        await pubsub
+          .topic(topicName)
+          .publishMessage({ data: Buffer.from(newFilename) });
+
+        console.log(`Message published to ${topicName}`);
+      } catch (err) {
+        console.error(`Error: ${err}`);
+      }
+    } else {
+      console.log(`gs://${bucketName}/${fileName} is not an image I can handle`);
+    }
+  } else {
+    console.log(`gs://${bucketName}/${fileName} already has a thumbnail`);
+  }
+});
+```
+and this to package.json:
+```JSON
+{
+ "name": "thumbnails",
+ "version": "1.0.0",
+ "description": "Create Thumbnail of uploaded image",
+ "scripts": {
+   "start": "node index.js"
+ },
+ "dependencies": {
+   "@google-cloud/functions-framework": "^3.0.0",
+   "@google-cloud/pubsub": "^2.0.0",
+   "@google-cloud/storage": "^6.11.0",
+   "sharp": "^0.32.1"
+ },
+ "devDependencies": {},
+ "engines": {
+   "node": ">=4.3.2"
+ }
+}
+
+```
+```Bash
+npm install
+```
+> double check below before trying
+```Bash
+gcloud functions deploy nodejs-pubsub-function \
+  --gen2 \
+  --runtime=nodejs22 \
+  --region=<REGION-NAME> \
+  --source=. \
+  --entry-point=helloPubSub \
+  --trigger-topic <TOPIC-NAME> \
+  --stage-bucket qwiklabs-gcp-04-cfd6cab10c3e-bucket \
+  --service-account cloudfunctionsa@qwiklabs-gcp-04-cfd6cab10c3e.iam.gserviceaccount.com \
+  --allow-unauthenticated
+```
+I ended up doing the following:
+```Bash
+student_02_84842e50102b@cloudshell:~/gcf_challenge (qwiklabs-gcp-02-46a1eaa4b990)$ gcloud functions deploy memories-thumbnail-creator \
+> --gen2 \
+> --runtime=nodejs22 \
+> --source=. \
+> --entry-point=memories-thumbnail-creator \
+> --trigger-bucket qwiklabs-gcp-02-46a1eaa4b990-bucket \
+> --region=asia-east1 \
+> --allow-unauthenticated
+```
+
+
+> SOME CRAZY PERMISSION ISSUES
+>> I had ot do it with GUI console instead
 
 
 
+Finally test the function by adding the following to the bucket:
+```Bash
+# We will be adding this to the curl command OR by manually downloading and adding(?)
+# https://storage.googleapis.com/cloud-training/gsp315/map.jpg
+```
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+### Task 4: Remove the previous cloud engineer
+> This one should just involve going to IAM and removing user 2's viewer access
 
 
 
